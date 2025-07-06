@@ -1,0 +1,933 @@
+
+
+// M20049 - Testing multiple keycap configs
+
+
+string selectedProfile = "Cherry";  // or "OEM", etc.
+int selectedRow = 1;
+double selectedSize = 1.0;
+PartMaster keycap = LoadProbingConfig(selectedProfile, selectedRow, selectedSize);
+
+
+currentSession = new KeycapSideProbeSession();
+currentSession.StartTime = DateTime.Now;
+
+
+// InitPartFaces();
+
+if (AS3.GetLED(753)) // If timer A is already running, toggle it twice to reset it
+{
+	exec.Callbutton(20092); // Toggles Timer A off
+	exec.Wait(200);
+	exec.Callbutton(20092); // Enables Timer A back on
+}
+else { exec.Callbutton(20092); } // Just toggles timer A since it's already off
+
+// ----------------- MAIN LOOP -----------------
+// For Probing Whatever is uncommented
+FaceProbeSettings rearFace = keycap.Faces.Find(f => f.Label == FaceLabel.Rear);
+FaceProbeSettings rightFace = keycap.Faces.Find(f => f.Label == FaceLabel.Right);
+FaceProbeSettings leftFace = keycap.Faces.Find(f => f.Label == FaceLabel.Left);
+FaceProbeSettings frontFace = keycap.Faces.Find(f => f.Label == FaceLabel.Front);
+FaceProbeSettings topFace = keycap.Faces.Find(f => f.Label == FaceLabel.Top);
+
+// currentSession.FaceResults.Add(ProbeFace(frontFace));
+// if (exec.Ismacrostopped()) return;
+
+// currentSession.FaceResults.Add(ProbeFace(rearFace));
+// if (exec.Ismacrostopped()) return;
+
+// currentSession.FaceResults.Add(ProbeFace(leftFace));
+// if (exec.Ismacrostopped()) return;
+
+// currentSession.FaceResults.Add(ProbeFace(rightFace));
+// if (exec.Ismacrostopped()) return;
+
+currentSession.FaceResults.Add(ProbeTopFace(topFace));
+if (exec.Ismacrostopped()) return;
+AnalyzeTopFaceCurvature(topFace);
+
+
+exec.AddStatusmessage("Profile = " + keycap.Profile);
+exec.AddStatusmessage("Row = " + keycap.Row.ToString("F3"));
+exec.AddStatusmessage("Size = " + keycap.Size.ToString("F3"));
+
+foreach (FaceProbeResult face in currentSession.FaceResults)
+{
+	exec.AddStatusmessage(face.Label + ": Start Time = " + face.StartTime.ToString("h:mm:ss tt"));
+	exec.AddStatusmessage(face.Label + ": End Time = " + face.EndTime.ToString("h:mm:ss tt"));
+	exec.AddStatusmessage(face.Label + ": Duration = " + face.Duration.ToString(@"mm\m\ ss\s"));
+	exec.AddStatusmessage(face.Label + ": AvgZ = " + face.AvgZ.ToString("F3"));
+	exec.AddStatusmessage(face.Label + ": CenterZ = " + face.CenterZ.ToString("F3"));
+	exec.AddStatusmessage(face.Label + ": Flatness = " + face.Flatness.ToString("F3"));
+	exec.AddStatusmessage(face.Label + ": TiltX_Deg = " + face.TiltX_deg.ToString("F3"));
+	exec.AddStatusmessage(face.Label + ": TiltY_Deg = " + face.TiltY_deg.ToString("F3"));
+	exec.AddStatusmessage(face.Label + ": TiltTotal_Deg = " + face.TiltTotal_deg.ToString("F3"));
+}
+
+
+// OutputMeasurementsForFace(FaceLabel.Front);
+
+
+currentSession.EndTime = DateTime.Now;
+currentSession.Duration = currentSession.EndTime - currentSession.StartTime;
+
+exec.AddStatusmessage("--------------------------------- Probe All Faces Complete ---------------------------------------");
+exec.AddStatusmessage("Complete Duration: " + currentSession.Duration.ToString(@"mm\m\ ss\s") + " at " + currentSession.EndTime.ToString("h:mm:ss tt"));
+exec.AddStatusmessage("--------------------------------- Probe All Faces Complete ---------------------------------------");
+exec.Callbutton(20092);
+
+
+
+#Events
+
+// ---------- STATIC VARIABLES ----------
+static PartMaster keycap;
+// static FaceProbeSet defaultVariable;
+
+// -------------- GLOBAL CONFIGURATION ----------------
+static double safeZ = 10.000;
+static double probeDepth = -8.000;
+static double probeFeed = 50.0;
+static double probeFeedInitial = 100;
+static double retractFeed = 100.0;
+static double travelFeed = 300.0;
+static double travelFeedFast = 1000.0;
+static double probeBackoff = 0.60;
+static double initialProbeOnNewFaceSafety = 5;
+
+static int outputField = 30002;
+static int WCS = 55;
+static int repeats = 1;
+static bool verboseOutput = true;
+static bool semiVerboseOutput = true;
+
+static string timestamp2 = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+static string customNote2 = "Cherry_Row1_Size1";
+static string filePath2 = Application.StartupPath + @"\Profiles\Macro_Taig2116-MyUI\Individual Keycap Probing\" +
+                          string.Format("log_{0}_{1}.csv", timestamp2, customNote2);
+static string masterPath = Application.StartupPath + @"\Profiles\Macro_Taig2116-MyUI\LOG_MasterKeycapProbe.csv";
+static string masterPathSimple = Application.StartupPath + @"\Profiles\Macro_Taig2116-MyUI\LOG_MasterKeycapProbeSIMPLE.csv";
+
+// For The Simple Master
+static string path5;
+static string filePath5;
+
+// static string filePath2
+
+static double combinedTopFaceXCenterAverage; // The primary value for determining sander pressure. 
+
+static string currentStage = "Endmill";  // Later settable by the user
+static string partSerialID = "LW79";
+
+FaceProbeResult ProbeFace(FaceProbeSettings face)
+{
+	FaceProbeResult result = new FaceProbeResult(face.Label);
+
+	DateTime startTime = DateTime.Now;
+	exec.Callbutton(20093); // Timer B enable
+
+	exec.AddStatusmessage("==========================================================================================");
+	exec.AddStatusmessage("Starting probing for: " + keycap.Profile + " Size " + keycap.Size + " Row " + keycap.Row);
+	exec.AddStatusmessage("Face: " + face.Label.ToString());
+
+	ExecAndWait("G90");
+	ExecAndWait("G53 G1 F1500 Z-5");
+
+	// ---- Set B and C axes safely using SnapToUCCNC
+	exec.AddStatusmessage("Fusion B: " + face.B.ToString() + " Fusion C: " + face.C.ToString());
+	ExecAndWait("G" + WCS + " G90 G1 F1000 B" + face.B.ToString() + " C" + face.C.ToString());
+
+	double[] probeZTrig = new double[face.Points.Count];
+
+	for (int i = 0; i < face.Points.Count; i++)
+	{
+		ProbePoint pt = face.Points[i];
+		double sumZ = 0;
+		int successfulReads = 0;
+
+		if (i == 0)
+		{
+			face.ZFaceRefHeight += initialProbeOnNewFaceSafety;
+			ExecAndWait("G" + WCS + " G1 F" + travelFeedFast + " X" + pt.X + " Y" + pt.Y);
+			ExecAndWait("G1 F" + travelFeedFast + " Z" + face.ZFaceRefHeight);
+			ExecAndWait("G31 Z" + probeDepth + " F" + probeFeedInitial);
+			ExecAndWait("G91 G1 F" + retractFeed + " Z" + probeBackoff);
+			ExecAndWait("G90");
+			face.ZFaceRefHeight -= initialProbeOnNewFaceSafety;
+		}
+		else
+		{
+			ExecAndWait("G1 F" + travelFeed + " X" + pt.X + " Y" + pt.Y);
+		}
+
+		for (int r = 0; r < repeats; r++)
+		{
+			ExecAndWait("G31 Z" + probeDepth + " F" + probeFeed);
+			if (exec.Ismacrostopped()) return result;
+			sumZ += exec.GetZpos();
+			successfulReads++;
+			if (r < repeats - 1)
+			{
+				ExecAndWait("G91 G01 F" + retractFeed + " Z" + probeBackoff);
+				ExecAndWait("G90");
+			}
+		}
+
+		if (successfulReads > 0) probeZTrig[i] = sumZ / successfulReads;
+		else
+		{
+			AS3.Setfieldtext("Failed at " + pt.Label, outputField);
+			return result;
+		}
+
+		ExecAndWait("G91 G01 F" + retractFeed + " Z" + probeBackoff);
+		ExecAndWait("G90");
+	}
+
+	// ----------------- Plane Fit and Metrics -----------------
+
+	int n = face.Points.Count;
+	double Sx = 0, Sy = 0;
+	for (int i = 0; i < n; i++) { Sx += face.Points[i].X; Sy += face.Points[i].Y; }
+	double xMean = Sx / n, yMean = Sy / n;
+
+	double Sxx = 0, Syy = 0, Sxy = 0, Sxz = 0, Syz = 0;
+	for (int i = 0; i < n; i++)
+	{
+		double dx = face.Points[i].X - xMean;
+		double dy = face.Points[i].Y - yMean;
+		double z = probeZTrig[i];
+		Sxx += dx * dx;
+		Syy += dy * dy;
+		Sxy += dx * dy;
+		Sxz += dx * z;
+		Syz += dy * z;
+	}
+
+	double denom = Sxx * Syy - Sxy * Sxy;
+	if (Math.Abs(denom) < 1e-6)
+	{
+		AS3.Setfieldtext("Plane fit error", outputField);
+		return result;
+	}
+
+	double a = (Sxz * Syy - Syz * Sxy) / denom;
+	double b = (Sxx * Syz - Sxy * Sxz) / denom;
+	double zAtMean = 0; for (int i = 0; i < n; i++) zAtMean += probeZTrig[i]; zAtMean /= n;
+	double c = zAtMean - a * xMean - b * yMean;
+	double centerZ = a * xMean + b * yMean + c;
+	face.centerPlaneZ = centerZ;
+
+	double tiltAngleRad = Math.Atan(Math.Sqrt(a * a + b * b));
+	double tiltAngleTotal = tiltAngleRad * 180.0 / Math.PI;
+	double tiltX_deg = Math.Atan(a) * 180.0 / Math.PI;
+	double tiltY_deg = Math.Atan(b) * 180.0 / Math.PI;
+
+	double minZ = probeZTrig[0], maxZ = probeZTrig[0];
+	for (int i = 1; i < probeZTrig.Length; i++) { if (probeZTrig[i] < minZ) minZ = probeZTrig[i]; if (probeZTrig[i] > maxZ) maxZ = probeZTrig[i]; }
+	double flatness = maxZ - minZ;
+	double avgMeasuredZ = 0; for (int i = 0; i < n; i++) avgMeasuredZ += probeZTrig[i]; avgMeasuredZ /= n;
+
+	// ----------------- Completion + Output -----------------
+	DateTime endTime = DateTime.Now;
+	TimeSpan duration = endTime - startTime;
+
+	exec.AddStatusmessage("===============================================================");
+	exec.AddStatusmessage("Total Duration: " + duration.ToString(@"mm\m\ ss\s") + " at " + endTime.ToString("h:mm:ss tt"));
+	exec.AddStatusmessage(face.Label + " | AvgZ: " + avgMeasuredZ.ToString("F6") + " | CenterZ: " + centerZ.ToString("F6"));
+	exec.AddStatusmessage(face.Label + " | Flatness: " + flatness.ToString("F4"));
+	exec.AddStatusmessage(face.Label + " | Tilt: " + tiltAngleTotal.ToString("F4") + "deg (X: " + tiltX_deg.ToString("F4") + "deg | Y: " + tiltY_deg.ToString("F4") + "deg)");
+	exec.AddStatusmessage("===============================================================");
+	ExecAndWait("G53 G1 F1500 Z-5");
+
+
+	for (int i = 0; i < face.Points.Count; i++)
+	{
+		ProbePoint pt = face.Points[i];
+		double z = probeZTrig[i];
+		result.Measurements.Add(new ProbeMeasurement(pt.Label, pt.X, pt.Y, z));
+	}
+
+	result.StartTime = startTime;
+	result.EndTime = endTime;
+	result.Duration = duration;
+	result.AvgZ = avgMeasuredZ;
+	result.CenterZ = centerZ;
+	result.Flatness = flatness;
+	result.TiltX_deg = tiltX_deg;
+	result.TiltY_deg = tiltY_deg;
+	result.TiltTotal_deg = tiltAngleTotal;
+
+
+	return result;
+
+
+}
+
+
+// --- Modify ProbeTopFace to call WriteCsvHeader at start and output probe data ---
+FaceProbeResult ProbeTopFace(FaceProbeSettings face)
+{
+	FaceProbeResult result = new FaceProbeResult(face.Label);
+
+	DateTime startTime = DateTime.Now;
+	exec.Callbutton(20093);
+
+	exec.AddStatusmessage("===============================================================");
+	exec.AddStatusmessage("Starting TOP probing");
+	exec.AddStatusmessage("Face: " + face.Label.ToString());
+
+	ExecAndWait("G90");
+	ExecAndWait("G53 G1 F1500 Z-5");
+
+	exec.AddStatusmessage("Fusion B: " + face.B.ToString() + " Fusion C: " + face.C.ToString());
+	ExecAndWait("G" + WCS + " G90 G1 F1000 B" + face.B.ToString("F3") + " C" + face.C.ToString("F3"));
+
+	for (int i = 0; i < face.Points.Count; i++)
+	{
+		ProbePoint pt = face.Points[i];
+		double sumX = 0;
+		int successfulReads = 0;
+		double retractDist = 1.5;
+		double extraApproachDist = 2.0;
+		double safetyApproachDist = 5.0;
+		double initialApproachX = pt.X - safetyApproachDist;
+		double approachX = pt.X - extraApproachDist;
+		double probeDiameterZComp = 1.00;
+		double zHeightWithProbeComp = pt.Z - probeDiameterZComp;
+
+		if (i == 0)
+		{
+			exec.AddStatusmessage("First Fast Probe On Top");
+
+			exec.AddStatusmessage("Face: " + face.Label.ToString() + " Going to Initial Approach X " + initialApproachX.ToString("F3") + " Final Y " + pt.Y.ToString("F3"));
+			ExecAndWait("G" + WCS + " G1 F" + travelFeedFast + " X" + initialApproachX.ToString("F3") + " Y" + pt.Y.ToString("F3"));
+
+			exec.AddStatusmessage("Face: " + face.Label.ToString() + " Going to zHeightWithProbeComp: " + zHeightWithProbeComp.ToString("F3"));
+			ExecAndWait("G" + WCS + " G1 F" + travelFeedFast + " Z" + zHeightWithProbeComp.ToString("F3"));
+
+			ExecAndWait("G31 X" + pt.X.ToString("F3") + " F" + probeFeedInitial.ToString("F2"));
+
+			// Retract
+			ExecAndWait("G91 G01 F" + retractFeed + " X-" + retractDist.ToString("F3"));
+			ExecAndWait("G90");
+		}
+		else
+		{
+			exec.AddStatusmessage("Face: " + face.Label.ToString() + " Going to Approach X " + approachX.ToString("F3") + " Final Y " + pt.Y.ToString("F3"));
+			ExecAndWait("G" + WCS + " G1 F" + travelFeed + " X" + approachX.ToString("F3") + " Y" + pt.Y.ToString("F3"));
+
+			exec.AddStatusmessage("Face: " + face.Label.ToString() + " Going to zHeightWithProbeComp: " + zHeightWithProbeComp.ToString("F3"));
+			ExecAndWait("G" + WCS + " G1 F" + travelFeed + " Z" + zHeightWithProbeComp.ToString("F3"));
+		}
+
+		for (int r = 0; r < repeats; r++)
+		{
+			ExecAndWait("G31 X" + pt.X.ToString("F3") + " F" + probeFeed.ToString("F2"));
+			if (exec.Ismacrostopped()) return result;
+			double individualTrigger = exec.GetXpos();
+			sumX += individualTrigger;
+			successfulReads++;
+			if (verboseOutput || semiVerboseOutput) exec.AddStatusmessage("Slow Probe: " + pt.Label + ": " + individualTrigger.ToString("F4"));
+
+			if (r < repeats - 1)
+			{
+				ExecAndWait("G91 G01 F" + retractFeed + " X-" + retractDist.ToString("F3"));
+				ExecAndWait("G90");
+			}
+		}
+
+		if (successfulReads > 0) pt.X = sumX / successfulReads;
+		else
+		{
+			AS3.Setfieldtext("Top probe fail at " + pt.Label, outputField);
+			return result;
+		}
+
+
+
+
+		ExecAndWait("G91 G01 F" + retractFeed + " X-" + retractDist.ToString("F3"));
+		ExecAndWait("G90");
+	}
+
+	ExecAndWait("G53 G1 F1500 Z-5");
+	exec.Callbutton(20093);
+	DateTime endTime = DateTime.Now;
+	TimeSpan duration = endTime - startTime;
+
+	result.StartTime = startTime;
+	result.EndTime = endTime;
+	result.Duration = duration;
+	return result;
+
+}
+
+
+
+
+
+// -------------- MOTION HELPER ----------------
+void ExecAndWait(string Command, int msWait = 200)
+{
+	exec.Code(Command);
+	while (exec.IsMoving()) { }
+	if (exec.Ismacrostopped()) return;
+	exec.Wait(msWait);
+}
+
+// --------------------------------------------------
+// EXPERIMENTAL NEW CLASSES
+static KeycapSideProbeSession currentSession;
+
+public class KeycapSideProbeSession
+{
+	public DateTime StartTime;
+	public DateTime EndTime;
+	public TimeSpan Duration;
+
+	public List<FaceProbeResult> FaceResults = new List<FaceProbeResult>();
+	public TopFaceAnalysisResult TopAnalysis; 
+
+}
+
+public class FaceProbeResult
+{
+	public FaceLabel Label;
+
+	public double AvgZ;
+	public double CenterZ;
+	public double Flatness;
+	public double TiltX_deg;
+	public double TiltY_deg;
+	public double TiltTotal_deg;
+	public DateTime StartTime;
+	public DateTime EndTime;
+	public TimeSpan Duration;
+	public List<ProbeMeasurement> Measurements = new List<ProbeMeasurement>();
+
+	public FaceProbeResult(FaceLabel label)
+	{
+		Label = label;
+	}
+}
+
+public class ProbeMeasurement
+{
+	public string Label;
+	public double X;
+	public double Y;
+	public double Z;
+
+	public ProbeMeasurement(string label, double x, double y, double z)
+	{
+		Label = label;
+		X = x;
+		Y = y;
+		Z = z;
+	}
+}
+
+
+// NEW TOP RESULTS CLASSES
+
+public class TopFaceAnalysisResult
+{
+	public List<TopFaceCurvatureResult> Slices = new List<TopFaceCurvatureResult>();
+
+	public double AvgCenterX;
+	public double CombinedTiltDeg;
+	public double CenterX_Top;
+	public double CenterX_Mid;
+	public double CenterX_Bot;
+
+	public double TiltAngleTopToBotDeg;
+}
+
+public class TopFaceCurvatureResult
+{
+	public double SliceZ;
+	public double CenterX;
+	public double CenterY;
+	public double Radius;
+	public double RadiusDeviation;
+	public double RMSDeviation;
+	public double TiltDegrees;
+
+	public TopFaceCurvatureResult(double sliceZ, double centerX, double centerY, double radius,
+	                              double radiusDeviation, double rmsDeviation, double tiltDegrees)
+	{
+		SliceZ = sliceZ;
+		CenterX = centerX;
+		CenterY = centerY;
+		Radius = radius;
+		RadiusDeviation = radiusDeviation;
+		RMSDeviation = rmsDeviation;
+		TiltDegrees = tiltDegrees;
+	}
+}
+
+
+// -------------- CLASS DEFINITIONS ----------------
+
+
+// exec.AddStatusmessage("Size = " + FaceProbeSettings.Size.ToString("F3"));
+
+
+
+public class PartMaster
+{
+	public string Profile;
+	public int Row;
+	public double Size;
+	public List<FaceProbeSettings> Faces;
+
+	public PartMaster(string profile, int row, double size)
+	{
+		Profile = profile;
+		Row = row;
+		Size = size;
+		Faces = new List<FaceProbeSettings>();
+	}
+}
+
+
+public class FaceProbeSettings
+{
+	public FaceLabel Label;
+	public double B, C, ZFaceRefHeight;
+
+	public double centerPlaneZ;
+	public List<ProbePoint> Points;
+
+	public FaceProbeSettings(FaceLabel label, double b, double c, double z, List<ProbePoint> points)
+	{
+		Label = label;
+		B = b;
+		C = c;
+		ZFaceRefHeight = z;
+		Points = points;
+	}
+}
+
+public class ProbePoint
+{
+	public string Label;
+	public double X;
+	public double Y;
+	public double Z;
+
+	public ProbePoint(string label, double x, double y)
+	{
+		Label = label;
+		X = x;
+		Y = y;
+		Z = 0.0;
+	}
+}
+
+
+
+public enum FaceLabel
+{
+	Front,
+	Rear,
+	Left,
+	Right,
+	Top
+}
+
+static double filler; // literally just to stop vscode from making everything below this red. 
+
+
+void OutputMeasurementsForFace(FaceLabel label)
+{
+	FaceProbeResult result = currentSession.FaceResults.Find(f => f.Label == label);
+	if (result != null)
+	{
+		exec.AddStatusmessage("------ Measurements for " + label.ToString() + " ------");
+		foreach (ProbeMeasurement m in result.Measurements)
+		{
+			exec.AddStatusmessage(
+				m.Label + " | X: " + m.X.ToString("F3") +
+				" Y: " + m.Y.ToString("F3") +
+				" Z: " + m.Z.ToString("F6")
+			);
+		}
+	}
+	else
+	{
+		exec.AddStatusmessage("Face not found: " + label.ToString());
+	}
+}
+
+
+// Nominal radius of the cylindrical top face
+static double nominalDiameter = 54.4881; // The actual diameter of the top face. 
+
+
+class SliceCenter
+{
+	public double Y;
+	public double CenterX;
+	public double CenterZ;
+
+	public SliceCenter(double y, double centerX, double centerZ)
+	{
+		Y = y;
+		CenterX = centerX;
+		CenterZ = centerZ;
+	}
+}
+
+// -------------- PLANE FIT FUNCTIONS ----------------
+
+// Updated Point2D for XY plane
+class Point2D
+{
+    public double X;
+    public double Y;  // was Z before
+
+    public Point2D(double x, double y)
+    {
+        X = x;
+        Y = y;
+    }
+}
+
+// Updated CircleFitResult for XY plane center
+class CircleFitResult
+{
+	public double CenterX;
+	public double CenterY;  // was CenterZ before
+	public double Radius;
+
+	public CircleFitResult(double centerX, double centerY, double radius)
+	{
+		CenterX = centerX;
+		CenterY = centerY;
+		Radius = radius;
+	}
+}
+
+
+// Updated FitCircle for XY points (Z → Y), with corrected radius calculation
+CircleFitResult FitCircle(List<Point2D> points)
+{
+	int n = points.Count;
+	double sumX = 0, sumY = 0, sumX2 = 0, sumY2 = 0;
+	double sumXY = 0, sumX3 = 0, sumY3 = 0, sumX2Y = 0, sumXY2 = 0;
+
+	foreach (var p in points)
+	{
+		double x = p.X;
+		double y = p.Y;
+		double x2 = x * x;
+		double y2 = y * y;
+
+		sumX += x;
+		sumY += y;
+		sumX2 += x2;
+		sumY2 += y2;
+		sumXY += x * y;
+		sumX3 += x2 * x;
+		sumY3 += y2 * y;
+		sumX2Y += x2 * y;
+		sumXY2 += x * y2;
+	}
+
+	double C = n * sumX2 - sumX * sumX;
+	double D = n * sumXY - sumX * sumY;
+	double E = n * sumX3 + n * sumXY2 - (sumX2 + sumY2) * sumX;
+	double G = n * sumY2 - sumY * sumY;
+	double H = n * sumX2Y + n * sumY3 - (sumX2 + sumY2) * sumY;
+
+	double denominator = 2 * (C * G - D * D);
+	if (Math.Abs(denominator) < 1e-12)
+	{
+		// Singular case
+		return new CircleFitResult(0, 0, 0);
+	}
+
+	double centerX = (E * G - H * D) / denominator;
+	double centerY = (C * H - D * E) / denominator;
+
+	// Corrected: compute radius as mean distance to center
+	double radiusSum = 0;
+	foreach (var p in points)
+	{
+		double dx = p.X - centerX;
+		double dy = p.Y - centerY;
+		radiusSum += Math.Sqrt(dx * dx + dy * dy);
+	}
+	double radius = radiusSum / n;
+
+	return new CircleFitResult(centerX, centerY, radius);
+}
+
+
+
+// Updated tilt estimator for XY plane
+double EstimateXYLineTiltDegrees(List<Point2D> points)
+{
+	int n = points.Count;
+	if (n == 0) return 0;
+
+	double sumX = 0;
+	double sumY = 0;
+	for (int i = 0; i < n; i++)
+	{
+		sumX += points[i].X;
+		sumY += points[i].Y;
+	}
+	double meanX = sumX / n;
+	double meanY = sumY / n;
+
+	double sumXY = 0;
+	double sumY2 = 0;
+	for (int i = 0; i < n; i++)
+	{
+		double dx = points[i].X - meanX;
+		double dy = points[i].Y - meanY;
+		sumXY += dx * dy;
+		sumY2 += dy * dy;
+	}
+
+	if (Math.Abs(sumY2) < 1e-9) return 0;
+
+	double slope = sumXY / sumY2;
+	double tiltRadians = Math.Atan(slope);
+	double tiltDegrees = tiltRadians * 180.0 / Math.PI;
+	return tiltDegrees;
+}
+
+class CenterPoint
+{
+	public double Z;
+	public double X;
+	public double Y;
+	public CenterPoint(double z, double x, double y)
+	{
+		Z = z;
+		X = x;
+		Y = y;
+	}
+}
+
+
+void OutputTopFaceAnalysis()
+{
+	if (currentSession.TopAnalysis == null)
+	{
+		exec.AddStatusmessage("No Top Face Analysis data available.");
+		return;
+	}
+
+	exec.AddStatusmessage("===== Top Face Analysis Results =====");
+
+	foreach (var slice in currentSession.TopAnalysis.Slices)
+	{
+		exec.AddStatusmessage(string.Format(
+			"Z={0:F3} | Cx={1:F3}, Cy={2:F3}, R={3:F3}, RDev={4:F6}, RMS={5:F6}, Tilt={6:F3}",
+			slice.SliceZ, slice.CenterX, slice.CenterY, slice.Radius,
+			slice.RadiusDeviation, slice.RMSDeviation, slice.TiltDegrees));
+	}
+
+	exec.AddStatusmessage(string.Format("Combined CenterX Avg: {0:F6}", currentSession.TopAnalysis.AvgCenterX));
+	exec.AddStatusmessage(string.Format("Top/Mid/Bot CenterX: {0:F4} / {1:F4} / {2:F4}",
+		currentSession.TopAnalysis.CenterX_Top,
+		currentSession.TopAnalysis.CenterX_Mid,
+		currentSession.TopAnalysis.CenterX_Bot));
+	exec.AddStatusmessage(string.Format("Overall Tilt Angle: {0:F4} deg", currentSession.TopAnalysis.TiltAngleTopToBotDeg));
+}
+
+void AnalyzeTopFaceCurvature(FaceProbeSettings face)
+{
+	exec.AddStatusmessage("Starting Top Face Curvature Analysis...");
+
+	TopFaceAnalysisResult result = new TopFaceAnalysisResult();
+
+	// Group points by Z for slicing
+	var zGroups = new Dictionary<double, List<ProbePoint>>();
+	foreach (var pt in face.Points)
+	{
+		if (!zGroups.ContainsKey(pt.Z)) zGroups[pt.Z] = new List<ProbePoint>();
+		zGroups[pt.Z].Add(pt);
+	}
+
+	foreach (var zGroup in zGroups)
+	{
+		double zVal = zGroup.Key;
+		List<ProbePoint> slicePoints = zGroup.Value;
+
+		var xyPoints = new List<Point2D>();
+		foreach (var p in slicePoints)
+			xyPoints.Add(new Point2D(p.X, p.Y));
+
+		CircleFitResult fit = FitCircle(xyPoints);
+		double centerX = fit.CenterX;
+		double centerY = fit.CenterY;
+		double radius = fit.Radius;
+
+		// RMS deviation from nominal radius
+		double sumSquaredDev = 0;
+		foreach (var p in xyPoints)
+		{
+			double dist = Math.Sqrt(Math.Pow(p.X - centerX, 2) + Math.Pow(p.Y - centerY, 2));
+			double dev = dist - nominalDiameter;
+			sumSquaredDev += dev * dev;
+		}
+		double rmsDev = Math.Sqrt(sumSquaredDev / xyPoints.Count);
+
+		double radiusDeviation = radius - nominalDiameter;
+		double tiltDegrees = EstimateXYLineTiltDegrees(xyPoints);
+
+		// Log (optional)
+		exec.AddStatusmessage(string.Format("Slice Z = {0:F3}", zVal));
+		exec.AddStatusmessage(string.Format("  Circle Fit: CenterX = {0:F4}, CenterY = {1:F4}, Radius = {2:F4}", centerX, centerY, radius));
+		exec.AddStatusmessage(string.Format("  Radius Deviation: {0:F6}", radiusDeviation));
+		exec.AddStatusmessage(string.Format("  RMS Deviation from Nominal Radius: {0:F6}", rmsDev));
+		exec.AddStatusmessage(string.Format("  Approximate Tilt (degrees): {0:F6}", tiltDegrees));
+
+		result.Slices.Add(new TopFaceCurvatureResult(
+			zVal, centerX, centerY, radius,
+			radiusDeviation, rmsDev, tiltDegrees));
+	}
+
+	// Final combined metrics from the three center rows
+	ProbePoint topCenter = face.Points.Find(p => p.Label == "Top Center");
+	ProbePoint middleCenter = face.Points.Find(p => p.Label == "Middle Center");
+	ProbePoint bottomCenter = face.Points.Find(p => p.Label == "Bottom Center");
+
+	if (topCenter != null && middleCenter != null && bottomCenter != null)
+	{
+		result.CenterX_Top = topCenter.X;
+		result.CenterX_Mid = middleCenter.X;
+		result.CenterX_Bot = bottomCenter.X;
+
+		result.AvgCenterX = (topCenter.X + middleCenter.X + bottomCenter.X) / 3.0;
+		combinedTopFaceXCenterAverage = result.AvgCenterX;
+
+		double deltaZ = topCenter.Z - bottomCenter.Z;
+		double deltaX = topCenter.X - bottomCenter.X;
+		double angleRad = Math.Atan2(deltaX, deltaZ);
+		result.TiltAngleTopToBotDeg = angleRad * 180.0 / Math.PI;
+		result.CombinedTiltDeg = result.TiltAngleTopToBotDeg;
+
+		exec.AddStatusmessage(string.Format("Combined Center Average X: {0:F6}", result.AvgCenterX));
+		exec.AddStatusmessage(string.Format("Combined Center Tilt Angle (deg): {0:F6}", result.TiltAngleTopToBotDeg));
+	}
+	else
+	{
+		exec.AddStatusmessage("Warning: Could not find all center points for combined average and tilt calculation.");
+	}
+
+	// Store to session
+	currentSession.TopAnalysis = result;
+}
+
+
+
+
+PartMaster LoadProbingConfig(string profile, int row, double size)
+{
+    PartMaster part = new PartMaster(profile, row, size);
+
+	if (profile == "Cherry" && row == 1 && Math.Abs(size - 1.0) < 0.01)
+	{
+	
+		 List<ProbePoint> frontPoints = new List<ProbePoint>
+    {
+        new ProbePoint("Right Top",     -73.918,  3.318),
+        new ProbePoint("Right Center",  -70.597,  4.764),
+        new ProbePoint("Right Bottom",  -67.275,  6.211),
+        new ProbePoint("Center Bottom", -67.275,  0.000),
+        new ProbePoint("Center Center", -70.496,  0.000),
+        new ProbePoint("Center Top",    -73.716,  0.000),
+        new ProbePoint("Left Top",      -73.918, -3.318),
+        new ProbePoint("Left Center",   -70.597, -4.764),
+        new ProbePoint("Left Bottom",   -67.275, -6.211)
+    };
+    part.Faces.Add(new FaceProbeSettings(FaceLabel.Front, 69.604, -90.0, 34.058, frontPoints));
+
+    List<ProbePoint> rearPoints = new List<ProbePoint>
+    {
+        new ProbePoint("Right Top",     -80.374,  3.394),
+        new ProbePoint("Right Center",  -77.403,  4.772),
+        new ProbePoint("Right Bottom",  -74.432,  6.151),
+        new ProbePoint("Center Bottom", -74.432,  0.000),
+        new ProbePoint("Center Center", -77.304,  0.000),
+        new ProbePoint("Center Top",    -80.176,  0.000),
+        new ProbePoint("Left Top",      -80.374, -3.394),
+        new ProbePoint("Left Center",   -77.403, -4.772),
+        new ProbePoint("Left Bottom",   -74.432, -6.151)
+    };
+    part.Faces.Add(new FaceProbeSettings(FaceLabel.Rear, 86.922, 90.0, 12.935, rearPoints));
+
+    List<ProbePoint> rightPoints = new List<ProbePoint>
+    {
+        new ProbePoint("Right Top",     -75.496,  5.442),
+        new ProbePoint("Right Center",  -72.054,  6.071),
+        new ProbePoint("Right Bottom",  -68.612,  6.701),
+        new ProbePoint("Center Bottom", -68.612,  0.298),
+        new ProbePoint("Center Center", -72.054,  0.818),
+        new ProbePoint("Center Top",    -75.496,  1.339),
+        new ProbePoint("Left Top",      -75.496, -2.764),
+        new ProbePoint("Left Center",   -72.054, -4.434),
+        new ProbePoint("Left Bottom",   -68.612, -6.105)
+    };
+    part.Faces.Add(new FaceProbeSettings(FaceLabel.Right, 71.945, 0.0, 31.343, rightPoints));
+
+    List<ProbePoint> leftPoints = new List<ProbePoint>
+    {
+        new ProbePoint("Right Top",     -75.496,  2.764),
+        new ProbePoint("Right Center",  -72.054,  4.434),
+        new ProbePoint("Right Bottom",  -68.612,  6.105),
+        new ProbePoint("Center Bottom", -68.612, -0.298),
+        new ProbePoint("Center Center", -72.054, -0.818),
+        new ProbePoint("Center Top",    -75.496, -1.339),
+        new ProbePoint("Left Top",      -75.496, -5.442),
+        new ProbePoint("Left Center",   -72.054, -6.071),
+        new ProbePoint("Left Bottom",   -68.612, -6.701)
+    };
+    part.Faces.Add(new FaceProbeSettings(FaceLabel.Left, 71.945, 180.0, 31.343, leftPoints));
+
+    List<ProbePoint> topPoints = new List<ProbePoint>
+    {
+        new ProbePoint("Top Far",       -82.976,  4.325) { Z =  3.880 },
+        new ProbePoint("Top Center",    -82.631,  0.000) { Z =  3.880 },
+        new ProbePoint("Top Close",     -82.976, -4.325) { Z =  3.880 },
+        new ProbePoint("Middle Far",    -82.976,  4.325) { Z = -1.547 },
+        new ProbePoint("Middle Center", -82.631,  0.000) { Z = -1.547 },
+        new ProbePoint("Middle Close",  -82.976, -4.325) { Z = -1.547 },
+        new ProbePoint("Bottom Far",    -82.976,  4.325) { Z = -6.975 },
+        new ProbePoint("Bottom Center", -82.631,  0.000) { Z = -6.975 },
+        new ProbePoint("Bottom Close",  -82.976, -4.325) { Z = -6.975 }
+    };
+    part.Faces.Add(new FaceProbeSettings(FaceLabel.Top, 89.999, -90.0, 0, topPoints));
+
+    }
+	else if (profile == "Cherry" && row == 2 && Math.Abs(size - 1.0) < 0.01)
+	{
+		// Paste fake Cherry Size 1 Row 2 data here
+		List<ProbePoint> frontPoints = new List<ProbePoint>
+		{
+			new ProbePoint("Right Top",     -70.000,  4.000),
+			new ProbePoint("Right Center",  -67.000,  5.000),
+			new ProbePoint("Right Bottom",  -64.000,  6.000),
+            // ...
+        };
+		part.Faces.Add(new FaceProbeSettings(FaceLabel.Front, 68.000, -90.0, 33.000, frontPoints));
+		// Add other faces ...
+	}
+	// Add more configs as needed
+	else
+	{
+		throw new Exception("Config not found: " + profile + " Row " + row + " Size " + size);
+	}
+
+    return part;
+}
+
+   
